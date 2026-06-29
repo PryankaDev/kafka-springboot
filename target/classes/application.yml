@@ -1,0 +1,40 @@
+server:
+  port: 8080
+
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+
+    # ── Producer Configuration ──────────────────────────────────────
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all                    # Wait for all in-sync replicas (at-least-once)
+      retries: 3
+      properties:
+        enable.idempotence: true   # Exactly-once producer deduplication
+        max.in.flight.requests.per.connection: 1
+
+    # ── Consumer Configuration ──────────────────────────────────────
+    consumer:
+      group-id: order-service-group
+      auto-offset-reset: earliest
+      enable-auto-commit: false    # Manual acknowledgment
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      max-poll-records: 100
+      properties:
+        spring.json.trusted.packages: "com.example.kafka.event"
+
+    # ── Listener Configuration ──────────────────────────────────────
+    listener:
+      ack-mode: manual             # Explicit acknowledgment after processing
+      concurrency: 3               # 3 threads per listener (matches partition count)
+      type: single                 # Use 'batch' for batch consumers
+
+# ── Logging ────────────────────────────────────────────────────────
+logging:
+  level:
+    com.example.kafka: DEBUG
+    org.springframework.kafka: INFO
+    org.apache.kafka: WARN
