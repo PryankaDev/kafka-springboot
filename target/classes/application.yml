@@ -11,6 +11,7 @@ spring:
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
       acks: all                    # Wait for all in-sync replicas (at-least-once)
       retries: 3
+      transaction-id-prefix: order-tx-
       properties:
         enable.idempotence: true   # Exactly-once producer deduplication
         max.in.flight.requests.per.connection: 1

@@ -51,8 +51,7 @@ public class OrderConsumer {
             @Payload OrderEvent event,
             @Header(KafkaHeaders.RECEIVED_PARTITION) int partition,
             @Header(KafkaHeaders.OFFSET) long offset,
-            @Header(KafkaHeaders.RECEIVED_KEY) String key,
-            Acknowledgment acknowledgment) {
+            @Header(KafkaHeaders.RECEIVED_KEY) String key) {
 
         log.info("Received order {} from partition={}, offset={}, key={}",
                 event.getOrderId(), partition, offset, key);
@@ -60,10 +59,7 @@ public class OrderConsumer {
         try {
             // Process the order — this may throw if downstream services are unavailable
             orderProcessingService.processOrder(event);
-
-            // Only commit the offset AFTER successful processing
-            // If this line is not reached (exception thrown), Kafka will redeliver
-            acknowledgment.acknowledge();
+            // ✅ No acknowledgment.acknowledge() — RECORD mode + tx commit handles offset
             log.info("Order {} processed and acknowledged", event.getOrderId());
 
         } catch (Exception ex) {

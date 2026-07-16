@@ -4,6 +4,7 @@ import com.example.kafka.event.OrderEvent;
 import com.example.kafka.event.NotificationEvent;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -12,16 +13,22 @@ import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.kafka.listener.CommonErrorHandler;
+import org.springframework.kafka.listener.ContainerProperties;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.DefaultErrorHandler;
 import org.springframework.kafka.support.serializer.JsonDeserializer;
+import org.springframework.kafka.transaction.KafkaTransactionManager;
 import org.springframework.util.backoff.ExponentialBackOff;
 import org.springframework.util.backoff.FixedBackOff;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.BiFunction;
 
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.TopicPartition;
 /**
  * Kafka Consumer Configuration
  *
@@ -49,6 +56,7 @@ public class KafkaConsumerConfig {
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);  // Manual ack
         props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 100);
+        props.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
         return props;
     }
 
@@ -81,6 +89,12 @@ public class KafkaConsumerConfig {
         );
     }
 
+    // ✅ NEW — KafkaTransactionManager uses same ProducerFactory as KafkaTemplate
+    @Bean
+    public KafkaTransactionManager<String, Object> kafkaTransactionManager(
+            ProducerFactory<String, Object> producerFactory) {
+        return new KafkaTransactionManager<>(producerFactory);
+    }
     // ── Error Handler: Exponential Backoff + DLT ─────────────────────────────
 
     /**
@@ -91,7 +105,17 @@ public class KafkaConsumerConfig {
      */
     @Bean
     public CommonErrorHandler errorHandler(KafkaTemplate<String, Object> kafkaTemplate) {
-        DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(kafkaTemplate);
+        // ✅ FIX: explicit DLT topic resolver — sends to "orders.DLT" partition 0
+        // The recoverer runs inside the container's transaction (wired below),
+        // so kafkaTemplate.send() to DLT has an active transaction context
+        DeadLetterPublishingRecoverer recoverer = new DeadLetterPublishingRecoverer(
+                kafkaTemplate,
+
+                        (consumerRecord, ex) -> {
+                            log.error("Sending to DLT | topic={} error={}",
+                                    consumerRecord.topic(), ex.getMessage());
+                            return new TopicPartition(consumerRecord.topic() + ".DLT", 0);
+                        });
 
         // Exponential backoff: starts at 1s, doubles each attempt, max 3 retries
         ExponentialBackOff backOff = new ExponentialBackOff(1_000L, 2.0);
@@ -102,7 +126,7 @@ public class KafkaConsumerConfig {
         // These exceptions go straight to DLT without any retry — retrying won't help
         handler.addNotRetryableExceptions(
                 com.fasterxml.jackson.core.JsonParseException.class,
-                javax.validation.ValidationException.class,
+                jakarta.validation.ValidationException.class,
                 IllegalArgumentException.class
         );
 
@@ -125,7 +149,7 @@ public class KafkaConsumerConfig {
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, OrderEvent> orderKafkaListenerContainerFactory(
             ConsumerFactory<String, OrderEvent> orderConsumerFactory,
-            CommonErrorHandler errorHandler) {
+            CommonErrorHandler errorHandler,KafkaTransactionManager<String, Object> kafkaTransactionManager) {
 
         ConcurrentKafkaListenerContainerFactory<String, OrderEvent> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
@@ -133,9 +157,15 @@ public class KafkaConsumerConfig {
         factory.setConsumerFactory(orderConsumerFactory);
         factory.setConcurrency(3);          // Match partition count
         factory.setCommonErrorHandler(errorHandler);
-        factory.getContainerProperties().setAckMode(
-                org.springframework.kafka.listener.ContainerProperties.AckMode.MANUAL
-        );
+
+        // ✅ FIX: container opens a Kafka transaction before invoking consumeOrder()
+        // This means DLT send inside DeadLetterPublishingRecoverer has active tx
+        factory.getContainerProperties()
+                .setKafkaAwareTransactionManager(kafkaTransactionManager);
+
+        // ✅ Switch to RECORD — MANUAL + transaction manager causes offset commit conflicts
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.RECORD);
+
 
         return factory;
     }
